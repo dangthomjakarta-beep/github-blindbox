@@ -63,7 +63,7 @@ name: GitHub 每日盲盒
 
 on:
   schedule:
-    - cron: '0 10 * * *'   # 每天 18:00 北京时间
+    - cron: '30 10 * * *'   # 每天 18:30 北京时间（错开数据抓取，确保最新）
   workflow_dispatch:
 
 jobs:

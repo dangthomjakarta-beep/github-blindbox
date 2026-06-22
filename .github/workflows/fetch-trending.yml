@@ -2,7 +2,7 @@ name: 抓取 GitHub Trending
 
 on:
   schedule:
-    - cron: '0 2 * * *'   # 每天 10:00 北京时间
+    - cron: '0 10 * * *'   # 每天 18:00 北京时间（UTC + 8），此时 Trending 数据完整
   workflow_dispatch:       # 支持手动触发
 
 jobs:

@@ -4,7 +4,6 @@
   "description": "GitHub 每日盲盒 — AI 自动筛选 Trending 项目，推送到邮箱",
   "type": "module",
   "scripts": {
-    "trending": "node scripts/github-trending.js",
     "digest": "node scripts/github-digest.js",
     "send": "node scripts/send-email.js"
   },

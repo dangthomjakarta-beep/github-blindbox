@@ -53,10 +53,22 @@ function buildPrompt(data, excludeList) {
 
   // Remove previously sent projects
   const excludeSet = new Set(excludeList);
-  const beforeCount = repos.length;
+  const initialCount = repos.length;
   repos = repos.filter(r => !excludeSet.has(r.fullName));
-  const afterCount = repos.length;
-  const excludedCount = beforeCount - afterCount;
+
+  // Normalize URLs: always use https://github.com/owner/repo regardless of
+  // what the API returned (some APIs return github.com/sponsors/owner etc.)
+  repos = repos.map(r => ({ ...r, url: `https://github.com/${r.fullName}` }));
+
+  // Filter out any remaining sponsors entries (unresolved or slipped through)
+  const beforeFilter = repos.length;
+  repos = repos.filter(r => r.owner !== 'sponsors');
+  if (repos.length < beforeFilter) {
+    console.error(`[github-digest] Filtered ${beforeFilter - repos.length} unresolved sponsors entries`);
+  }
+
+  // Compute exclusion count after all filtering (so the prompt is accurate)
+  const excludedCount = initialCount - repos.length;
   const today = new Date().toLocaleDateString('zh-CN', {
     year: 'numeric', month: 'long', day: 'numeric', weekday: 'long'
   });
@@ -86,17 +98,6 @@ function buildPrompt(data, excludeList) {
     return `\n📅 昨天推送品类分布：${parts.join('、')}。今天请尽量调换口味，不要和昨天高度重复。\n`;
   })();
 
-  // Normalize URLs: always use https://github.com/owner/repo regardless of
-  // what the API returned (some APIs return github.com/sponsors/owner etc.)
-  repos = repos.map(r => ({ ...r, url: `https://github.com/${r.fullName}` }));
-
-  // Filter out any remaining sponsors entries (unresolved or slipped through)
-  const beforeFilter = repos.length;
-  repos = repos.filter(r => r.owner !== 'sponsors');
-  if (repos.length < beforeFilter) {
-    console.error(`[github-digest] Filtered ${beforeFilter - repos.length} unresolved sponsors entries`);
-  }
-
   let repoList = '';
   for (const repo of repos) {
     repoList += `\n## ${repo.fullName}
@@ -110,7 +111,7 @@ function buildPrompt(data, excludeList) {
   }
 
   return `今天的日期是 ${today}。以下是从 GitHub Trending 今日列表中抓取到的热门项目。
-${excludedCount > 0 ? `\n注意：今天原始数据共 ${beforeCount} 个项目，其中 ${excludedCount} 个已经在前几天推送过，已自动排除，剩余 ${afterCount} 个待筛选。` : ''}
+${excludedCount > 0 ? `\n注意：今天原始数据共 ${initialCount} 个项目，其中 ${excludedCount} 个已排除（历史去重 + 数据过滤），剩余 ${initialCount - excludedCount} 个待筛选。` : ''}
 
 你的任务是从这些项目中筛选出**真正值得关注**的，然后生成一封邮件正文。
 

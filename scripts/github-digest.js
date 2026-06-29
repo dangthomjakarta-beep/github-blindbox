@@ -65,6 +65,13 @@ function buildPrompt(data, excludeList) {
   // what the API returned (some APIs return github.com/sponsors/owner etc.)
   repos = repos.map(r => ({ ...r, url: `https://github.com/${r.fullName}` }));
 
+  // Filter out any remaining sponsors entries (unresolved or slipped through)
+  const beforeFilter = repos.length;
+  repos = repos.filter(r => r.owner !== 'sponsors');
+  if (repos.length < beforeFilter) {
+    console.error(`[github-digest] Filtered ${beforeFilter - repos.length} unresolved sponsors entries`);
+  }
+
   let repoList = '';
   for (const repo of repos) {
     repoList += `\n## ${repo.fullName}

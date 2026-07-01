@@ -3,8 +3,8 @@ name: AI 构建者每日邮件简报
 on:
   workflow_dispatch:
   schedule:
-    # 09:00 Asia/Shanghai. GitHub Actions cron uses UTC.
-    - cron: "0 1 * * *"
+    # 08:30 Asia/Shanghai. GitHub Actions cron uses UTC.
+    - cron: "30 0 * * *"
 
 jobs:
   send-digest:

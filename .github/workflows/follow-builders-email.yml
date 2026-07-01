@@ -1,0 +1,40 @@
+name: Follow Builders Email Digest
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 09:00 Asia/Shanghai. GitHub Actions cron uses UTC.
+    - cron: "0 1 * * *"
+
+jobs:
+  send-digest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Generate and send digest
+        run: node scripts/follow-builders-email.js
+        env:
+          # Reuse the same names as github-blindbox.
+          ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+          ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          QQ_EMAIL: ${{ secrets.QQ_EMAIL }}
+          QQ_SMTP_AUTH_CODE: ${{ secrets.QQ_SMTP_AUTH_CODE }}
+
+          # Optional. If empty, the email is sent to QQ_EMAIL.
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+
+          # Optional tuning.
+          MAX_DIGEST_TOKENS: "3500"
+          MAX_TRANSCRIPT_CHARS: "32000"
+          MAX_BLOG_CHARS: "7000"
+          MAX_TWEETS_PER_BUILDER: "5"

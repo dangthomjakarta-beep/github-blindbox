@@ -1,4 +1,4 @@
-name: Follow Builders Email Digest
+name: AI 构建者每日邮件简报
 
 on:
   workflow_dispatch:

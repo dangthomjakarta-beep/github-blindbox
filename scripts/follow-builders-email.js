@@ -9,6 +9,15 @@ const FEED_PODCASTS_URL =
   "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-podcasts.json";
 const FEED_BLOGS_URL =
   "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/feed-blogs.json";
+const PROMPTS_BASE_URL =
+  "https://raw.githubusercontent.com/zarazhangrui/follow-builders/main/prompts";
+const PROMPT_FILES = {
+  digestIntro: "digest-intro.md",
+  summarizePodcast: "summarize-podcast.md",
+  summarizeTweets: "summarize-tweets.md",
+  summarizeBlogs: "summarize-blogs.md",
+  translate: "translate.md",
+};
 
 function loadLocalEnv() {
   if (!existsSync(".env")) return;
@@ -58,6 +67,34 @@ async function fetchJSON(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchText(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status} from ${url}`);
+    }
+    return await res.text();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function loadOfficialPrompts() {
+  const entries = await Promise.all(
+    Object.entries(PROMPT_FILES).map(async ([key, filename]) => {
+      try {
+        return [key, await fetchText(`${PROMPTS_BASE_URL}/${filename}`)];
+      } catch (error) {
+        console.warn(`Could not load official prompt ${filename}: ${error.message}`);
+        return [key, ""];
+      }
+    }),
+  );
+  return Object.fromEntries(entries);
 }
 
 async function loadFollowBuildersData() {
@@ -129,13 +166,18 @@ function beijingDateLabel() {
   }).format(new Date());
 }
 
-function buildPrompt(data) {
+function buildPrompt(data, prompts) {
+  const officialPrompts = Object.entries(prompts || {})
+    .filter(([, content]) => content)
+    .map(([key, content]) => `### ${key}\n${content.trim()}`)
+    .join("\n\n");
+
   return [
     {
       role: "system",
       content: [
         "你是 Follow Builders AI 简报主编，理念是 follow builders, not influencers。",
-        "你的任务不是翻译信息流，而是帮忙筛选真正有原创观点、产品变化、研究进展或实操价值的内容。",
+        "你的任务不是翻译信息流，而是按官方 prompt 的精神，筛选真正有原创观点、产品变化、研究进展或实操价值的内容。",
         "读者是中文 AI 工具使用者、产品/运营/业务负责人和想跟进 AI 产业变化的忙碌专业人士。",
         "你只可以使用用户提供的 JSON 内容写简报，不要访问网页，不要编造事实。",
         "每个被写入简报的项目都必须带原始 URL；没有 URL 的内容不要写。",
@@ -150,11 +192,15 @@ function buildPrompt(data) {
         "",
         "请按下面结构输出。不要机械罗列，要先判断重要性，再解释为什么值得读。",
         "",
+        "官方项目 prompt（必须遵守其筛选和写作原则）：",
+        officialPrompts || "官方 prompt 暂时无法获取；请严格按 follow builders, not influencers 的原则执行。",
+        "",
         "1. 标题",
         "格式：AI Builders Digest — 日期",
         "",
         "2. 今日一句话",
         "用 1 句话概括今天最值得注意的 AI 变化。如果当天内容很少，要直接说明“今天有效信号不多”。",
+        "下一行写：数据源更新时间：feedGeneratedAt 对应的时间。如果 feedGeneratedAt 为空，写“数据源更新时间：未提供”。",
         "",
         "3. 今天最重要的 3-5 个信号",
         "每个信号使用这个格式：",
@@ -198,6 +244,7 @@ function buildPrompt(data) {
         "- 没有 URL 的内容不要写。",
         "- 不要把所有原文逐条翻译，要提炼成简报。",
         "- 不要编造原文没有的发布时间、数字、产品名、观点或结论。",
+        "- 不要因为某个来源被特别提到就强行展示；只按内容价值筛选。",
         "- 如果某一类没有内容，就跳过该类，但保留整体结构的关键部分。",
         "- 总长度控制在 1200-2200 个中文汉字左右，宁可少写低价值内容，也不要凑篇幅。",
         "- 排版适合手机邮件阅读：短段落、清晰小标题、少用长句。",
@@ -209,7 +256,7 @@ function buildPrompt(data) {
   ];
 }
 
-async function generateDigest(data) {
+async function generateDigest(data, prompts) {
   const apiKey = env("ANTHROPIC_AUTH_TOKEN") || env("DEEPSEEK_API_KEY");
   if (!apiKey) {
     throw new Error("Missing ANTHROPIC_AUTH_TOKEN or DEEPSEEK_API_KEY");
@@ -232,7 +279,7 @@ async function generateDigest(data) {
       model,
       temperature: 0.35,
       max_tokens: Number(env("MAX_DIGEST_TOKENS", "6000")),
-      messages: buildPrompt(data),
+      messages: buildPrompt(data, prompts),
     }),
   });
 
@@ -380,6 +427,7 @@ async function main() {
   loadLocalEnv();
 
   const data = await loadFollowBuildersData();
+  const prompts = await loadOfficialPrompts();
   if (
     data.stats.xBuilders === 0 &&
     data.stats.podcastEpisodes === 0 &&
@@ -390,7 +438,7 @@ async function main() {
   }
 
   console.log("Loaded follow-builders feed:", JSON.stringify(data.stats));
-  const digest = await generateDigest(data);
+  const digest = await generateDigest(data, prompts);
   const subject = env("MAIL_SUBJECT", `AI Builders Digest - ${beijingDateLabel()}`);
 
   if (env("DRY_RUN") === "1") {

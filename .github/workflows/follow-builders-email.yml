@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # 18:00 Asia/Shanghai. GitHub Actions cron uses UTC.
-    - cron: "0 18 * * *"
+    - cron: "0 10 * * *"
 
 jobs:
   send-digest:

@@ -3,7 +3,11 @@ name: GitHub 每日盲盒
 on:
   schedule:
     - cron: '0 10 * * *'   # 每天 18:00 北京时间（错开数据抓取时间，确保拿到最新数据）
-  workflow_dispatch:         # 支持手动触发
+  workflow_dispatch:       # 支持手动触发
+
+concurrency:
+  group: github-blindbox-digest
+  cancel-in-progress: false
 
 jobs:
   send:
@@ -15,20 +19,22 @@ jobs:
           node-version: '24'
 
       - name: 安装依赖
-        run: cd scripts && npm install
+        run: npm install
 
       - name: 拉取最新 Trending 数据
         run: curl -sfL -o trending-feed.json https://raw.githubusercontent.com/zhangxq0606-ctrl/github-blindbox/master/trending-feed.json
 
-      - name: 恢复历史去重缓存
+      - name: 恢复历史去重与选题状态
         id: cache-restore
         uses: actions/cache@v5
         with:
-          path: .trending-history.json
+          path: |
+            .trending-history.json
+            .trending-history-state.json
+            .trending-selection.json
           key: trending-history-${{ github.repository }}-${{ github.run_id }}
           restore-keys: |
-              trending-history-${{ github.repository }}-
-              trending-history-${{ github.repository }}
+            trending-history-${{ github.repository }}-
 
       - name: 检查必需 Secrets
         env:
@@ -45,18 +51,31 @@ jobs:
           [ -n "$QQ_SMTP_AUTH_CODE" ] || { echo "::error::缺少 Secret: QQ_SMTP_AUTH_CODE"; exit 1; }
           echo "必需 Secrets 已配置"
 
-      - name: 生成摘要（带历史去重）
+      - name: 生成摘要（选题引擎 + 历史去重）
         env:
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
           ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
         run: |
-          EXCLUDE_ARGS=""
+          DIGEST_ARGS=(--history-state-file .trending-history-state.json)
           if [ -s .trending-history.json ]; then
-            EXCLUDE_ARGS="--exclude-file .trending-history.json"
-            echo "历史去重文件存在，将排除已推送项目"
+            DIGEST_ARGS+=(--exclude-file .trending-history.json)
+            echo "历史去重文件存在，将继续排除已推送项目"
           fi
-          cat trending-feed.json | node scripts/github-digest.js $EXCLUDE_ARGS --history-output .trending-history.new.json > /tmp/digest.txt
+          DATA_AGE_HOURS="$(node -e '
+            const fs = require("fs");
+            const data = JSON.parse(fs.readFileSync("trending-feed.json", "utf8"));
+            const fetchedAt = Date.parse(data.fetchedAt || "");
+            const age = Number.isFinite(fetchedAt) ? Math.floor((Date.now() - fetchedAt) / 3600000) : 0;
+            process.stdout.write(String(Math.max(0, age)));
+          ')"
+          echo "Trending 数据年龄: ${DATA_AGE_HOURS} 小时"
+          cat trending-feed.json | node scripts/github-digest.js \
+            "${DIGEST_ARGS[@]}" \
+            --history-output .trending-history.new.json \
+            --history-state-output .trending-history-state.new.json \
+            --selection-output .trending-selection.new.json \
+            --data-age-hours "$DATA_AGE_HOURS" > /tmp/digest.txt
           echo "摘要生成完成"
 
       - name: 发送邮件
@@ -69,20 +88,60 @@ jobs:
             --to "$QQ_EMAIL" \
             --subject "GitHub 每日盲盒 — $(date '+%Y-%m-%d')"
 
-      - name: 更新历史去重缓存
+      - name: 更新历史去重与选题状态
         if: steps.send-email.outcome == 'success'
         run: |
-          if [ -s .trending-history.new.json ]; then
-            # 合并今日项目和旧历史，去重后保留最近 300 条
-            node -e "
-              const fs = require('fs');
-              const today = JSON.parse(fs.readFileSync('.trending-history.new.json','utf-8'));
-              let history = [];
-              try { history = JSON.parse(fs.readFileSync('.trending-history.json','utf-8')); } catch {}
-              const merged = [...new Set([...history, ...today])];
-              const trimmed = merged.slice(-300);
-              fs.writeFileSync('.trending-history.json', JSON.stringify(trimmed));
-              console.log('历史去重缓存已更新: ' + trimmed.length + ' 条');
-            "
-            rm -f .trending-history.new.json
-          fi
+          node <<'NODE'
+          const fs = require('fs');
+
+          function readJson(path, fallback) {
+            try {
+              return JSON.parse(fs.readFileSync(path, 'utf8'));
+            } catch {
+              return fallback;
+            }
+          }
+
+          if (fs.existsSync('.trending-history.new.json')) {
+            const today = readJson('.trending-history.new.json', []);
+            const history = readJson('.trending-history.json', []);
+            const merged = [...new Set([
+              ...(Array.isArray(history) ? history : []),
+              ...(Array.isArray(today) ? today : [])
+            ])].slice(-300);
+            fs.writeFileSync('.trending-history.json', JSON.stringify(merged, null, 2));
+            fs.rmSync('.trending-history.new.json');
+            console.log('历史去重缓存已更新: ' + merged.length + ' 条');
+          }
+
+          if (fs.existsSync('.trending-history-state.new.json')) {
+            const current = readJson('.trending-history-state.json', { version: 1, entries: [] });
+            const incoming = readJson('.trending-history-state.new.json', { version: 1, entries: [] });
+            const byName = new Map();
+            for (const entry of [
+              ...(Array.isArray(current.entries) ? current.entries : []),
+              ...(Array.isArray(incoming.entries) ? incoming.entries : [])
+            ]) {
+              if (entry && typeof entry.fullName === 'string') byName.set(entry.fullName, entry);
+            }
+            const timestamp = entry => {
+              const value = Date.parse(entry.sentAt || '');
+              return Number.isFinite(value) ? value : 0;
+            };
+            const entries = [...byName.values()]
+              .sort((a, b) => timestamp(a) - timestamp(b))
+              .slice(-300);
+            fs.writeFileSync(
+              '.trending-history-state.json',
+              JSON.stringify({ version: 1, entries }, null, 2)
+            );
+            fs.rmSync('.trending-history-state.new.json');
+            console.log('时间戳选题状态已更新: ' + entries.length + ' 条');
+          }
+
+          if (fs.existsSync('.trending-selection.new.json')) {
+            fs.rmSync('.trending-selection.json', { force: true });
+            fs.renameSync('.trending-selection.new.json', '.trending-selection.json');
+            console.log('本次选题清单已保存');
+          }
+          NODE

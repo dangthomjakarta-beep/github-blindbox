@@ -1,12 +1,89 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "GitHub 每日盲盒 — 用户配置",
+  "description": "GitHub 每日盲盒 — 用户偏好配置。改这个文件 = 改筛选标准、主题多样性和硬过滤规则",
   "type": "object",
   "properties": {
     "readerProfile": {
       "type": "string",
-      "description": "阅读者画像，AI 据此筛选项目。改这段文字 = 改筛选标准",
-      "default": "独立开发者，vibecoding 实践者，追求实用、有创意的产品，不需要底层技术/算法/框架"
+      "description": "阅读者画像，AI 据此撰写和筛选项目。改这段文字 = 改推荐方向"
+    },
+    "diversityPolicy": {
+      "type": "object",
+      "description": "程序选题的多样性约束，防止连续推荐同一主题、同一作者或过多 AI 项目",
+      "properties": {
+        "maxAiProjects": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "一封邮件最多推荐的 AI 核心项目数"
+        },
+        "maxPerTopic": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "同一主题最多推荐数"
+        },
+        "minDistinctTopics": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "一封邮件至少覆盖的不同主题数"
+        },
+        "ownerCooldownDays": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "同一组织再次出现前的软冷却天数"
+        },
+        "semanticCooldownDays": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "近期主题和生态的降权窗口"
+        },
+        "allowReducedDigest": {
+          "type": "boolean",
+          "description": "候选不足时是否允许减少推荐数；仍不得低于程序最低质量门槛"
+        }
+      },
+      "additionalProperties": false
+    },
+    "hardFilters": {
+      "type": "array",
+      "description": "数据层硬过滤规则。在送入 LLM 前删除明显不相关项目",
+      "items": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "description": "规则名称，用于 Actions 日志"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "不区分大小写的正则表达式"
+          },
+          "field": {
+            "type": "string",
+            "enum": [
+              "description",
+              "fullName"
+            ],
+            "description": "匹配 description 或 fullName"
+          },
+          "starsException": {
+            "type": "number",
+            "minimum": 0,
+            "description": "可选；项目星数达到该值时保留，适用于极成熟项目"
+          }
+        },
+        "required": [
+          "reason",
+          "pattern",
+          "field"
+        ],
+        "additionalProperties": false
+      }
     }
-  }
+  },
+  "required": [
+    "readerProfile",
+    "diversityPolicy",
+    "hardFilters"
+  ],
+  "additionalProperties": false
 }

@@ -54,7 +54,9 @@
 
 已经能收到邮件了。如果想改：
 
-**筛选方向**：到 `scripts/github-digest.js` 里找「阅读者画像」段落，把你的关注方向写进去就行。比如你是设计师就写喜欢好看的东西，你是后端就写关注性能。
+**筛选方向**：打开 `config/preferences.json`，修改 `readerProfile`。你可以写入自己的业务场景，例如企业 AI 落地、零售运营、知识库、自动化、经营数据和培训内容。不要直接改 `scripts/github-digest.js` 里的程序逻辑。
+
+**选题多样性**：同一个文件里的 `diversityPolicy` 控制同一主题、同一组织和 AI 项目数量；`hardFilters` 控制明显无关项目。`.trending-history*.json` 和 `.trending-selection*.json` 是 Actions 自动缓存，不需要手工创建，也不要提交到仓库。
 
 **推送时间**：到 `.github/workflows/digest.yml` 里找到 cron 那行改掉。注意我每天 05:00 抓数据，GitHub Actions 有延迟，**推送必须设在 07:00 之后**。
 
@@ -62,4 +64,4 @@ UTC 换算：`北京时间 - 8`。想 20:00 收到就填 `0 12 * * *`，想 22:0
 
 改完直接 GitHub 网页上点 Commit 就行。
 
-
+这次升级只涉及 GitHub 每日盲盒工作流；`follow-builders-email.yml` 不需要同步或修改。不要点击“同步分支”或“丢弃提交”，只在你自己的 Fork 中提交上述文件的更新。

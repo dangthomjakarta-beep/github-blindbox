@@ -1,3 +1,5 @@
 node_modules/
 .env
 *.log
+.trending-history*.json
+.trending-selection*.json

@@ -330,10 +330,11 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   const finalCount = fresh.length + evergreen.length;
   if (finalCount < MIN_TOTAL_RECOMMENDATIONS || distinctTopics < policy.minDistinctTopics) {
     const message = `Diversity gate failed: selected=${finalCount}, topics=${distinctTopics}/${policy.minDistinctTopics}`;
-    if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
-      throw new Error(`${message}. Reduced digest cannot satisfy the minimum topic coverage.`);
-    }
-    throw new Error(message);
+  if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
+  console.error(`[github-digest] ${message}; allowing reduced digest`);
+} else {
+  throw new Error(message);
+};
   }
   return {
     fresh: fresh.map(repo => ({ ...repo, pool: 'fresh' })),

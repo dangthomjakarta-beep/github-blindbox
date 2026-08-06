@@ -13,8 +13,10 @@ const EVERGREEN_COOLDOWN_DAYS = 14;
 const MAX_POOL_GENERATION_ATTEMPTS = 3;
 const MAX_LENGTH_REWRITE_ATTEMPTS = 2;
 const MIN_DIGEST_BYTES = 3600
+const FRESH_SELECTION_LIMIT = 7;
+const EVERGREEN_SELECTION_LIMIT = 3;
 const MIN_TOTAL_RECOMMENDATIONS = 5;
-const MAX_TOTAL_RECOMMENDATIONS = 7;
+const MAX_TOTAL_RECOMMENDATIONS = 10;
 const MIN_EVERGREEN_POOL = 12;
 const FRESH_SHORTLIST_LIMIT = 60;
 const EVERGREEN_SHORTLIST_LIMIT = 30;
@@ -309,8 +311,8 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   let ownerFallback = false;
 
   // Pass 1: strict owner cooldown (avoid recent owners)
-  let fresh = pickDiverseCandidates(pools.fresh, 5, policy, semanticState, selected, false);
-  let evergreen = pickDiverseCandidates(pools.evergreen, 2, policy, semanticState, selected, false);
+  let fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, false);
+  let evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, policy, semanticState, selected, false);
   let distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
 
   // Pass 2: if topic diversity insufficient, relax owner cooldown to fill missing topics
@@ -318,8 +320,8 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     const beforeCount = fresh.length + evergreen.length;
     const beforeTopics = distinctTopics;
     selected.length = 0;
-    fresh = pickDiverseCandidates(pools.fresh, 5, policy, semanticState, selected, true);
-    evergreen = pickDiverseCandidates(pools.evergreen, 2, policy, semanticState, selected, true);
+    fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, true);
+    evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, policy, semanticState, selected, true);
     distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
     ownerFallback = true;
     console.error(`[github-digest] Owner cooldown fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${fresh.length + evergreen.length} projects, ${distinctTopics} topics`);

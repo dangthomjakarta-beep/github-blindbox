@@ -21,8 +21,8 @@ jobs:
       - name: 安装依赖
         run: npm install
 
-      - name: 拉取最新 Trending 数据
-        run: curl -sfL -o trending-feed.json https://raw.githubusercontent.com/zhangxq0606-ctrl/github-blindbox/master/trending-feed.json
+      - name: 自主抓取最新 Trending 数据
+        run: node scripts/github-trending.js > trending-feed.json
 
       - name: 恢复历史去重与选题状态
         id: cache-restore

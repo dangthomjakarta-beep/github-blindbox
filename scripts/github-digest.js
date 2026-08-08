@@ -308,7 +308,9 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   const policy = normalizeDiversityPolicy(preferences);
   const semanticState = recentSemanticState(historyState?.entries || [], policy, now);
   const selected = [];
+  let effectivePolicy = policy;
   let ownerFallback = false;
+  let quantityFallback = false;
 
   // Pass 1: strict owner cooldown (avoid recent owners)
   let fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, false);
@@ -327,19 +329,42 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     console.error(`[github-digest] Owner cooldown fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${fresh.length + evergreen.length} projects, ${distinctTopics} topics`);
   }
 
-  const finalCount = fresh.length + evergreen.length;
+  let finalCount = fresh.length + evergreen.length;
+
+  // Last resort: keep one project per owner, but relax AI and topic caps so a
+  // sparse history window does not suppress the entire day's email.
+  if (finalCount < MIN_TOTAL_RECOMMENDATIONS) {
+    const beforeCount = finalCount;
+    const beforeTopics = distinctTopics;
+    effectivePolicy = {
+      ...policy,
+      maxAiProjects: Math.max(policy.maxAiProjects, MAX_TOTAL_RECOMMENDATIONS),
+      maxPerTopic: Math.max(policy.maxPerTopic, MAX_TOTAL_RECOMMENDATIONS)
+    };
+    selected.length = 0;
+    fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, effectivePolicy, semanticState, selected, true);
+    evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, effectivePolicy, semanticState, selected, true);
+    distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
+    finalCount = fresh.length + evergreen.length;
+    quantityFallback = true;
+    console.error(`[github-digest] Quantity fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${finalCount} projects, ${distinctTopics} topics; relaxed AI/topic caps, kept one project per owner`);
+  }
+
   if (finalCount < MIN_TOTAL_RECOMMENDATIONS || distinctTopics < policy.minDistinctTopics) {
     const message = `Diversity gate failed: selected=${finalCount}, topics=${distinctTopics}/${policy.minDistinctTopics}`;
-  if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
-  console.error(`[github-digest] ${message}; allowing reduced digest`);
-} else {
-  throw new Error(message);
-};
+    if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
+      console.error(`[github-digest] ${message}; allowing reduced digest`);
+    } else {
+      throw new Error(message);
+    }
   }
   return {
     fresh: fresh.map(repo => ({ ...repo, pool: 'fresh' })),
     evergreen: evergreen.map(repo => ({ ...repo, pool: 'evergreen' })),
-    policy, semanticState, ownerFallback
+    policy: effectivePolicy,
+    semanticState,
+    ownerFallback,
+    quantityFallback
   };
 }
 
@@ -536,7 +561,8 @@ async function main() {
       fresh: selection.fresh,
       evergreen: selection.evergreen,
       policy: selection.policy,
-      ownerFallback: selection.ownerFallback
+      ownerFallback: selection.ownerFallback,
+      quantityFallback: selection.quantityFallback
     }, null, 2));
     return;
   }

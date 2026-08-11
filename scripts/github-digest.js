@@ -255,6 +255,10 @@ function buildPools(repos, excludeList, historyState, now, shortlists) {
   const normalized = repos
     .filter(repo => repo.owner !== 'sponsors' && repo.fullName)
     .map(repo => classifyRepo({ ...repo, url: `https://github.com/${repo.fullName}`, periods: normalizePeriods(repo) }));
+  const evergreenShortlistNames = new Set([
+    ...shortlists.monthlyNames,
+    ...shortlists.weeklyFallbackNames
+  ]);
   const fresh = normalized.filter(repo => shortlists.freshNames.has(repo.fullName) && !freshBlocked.has(repo.fullName));
   const monthlyEvergreen = normalized.filter(repo => shortlists.monthlyNames.has(repo.fullName) && !evergreenBlocked.has(repo.fullName));
   const monthlyNames = new Set(monthlyEvergreen.map(repo => repo.fullName));
@@ -264,9 +268,14 @@ function buildPools(repos, excludeList, historyState, now, shortlists) {
       .sort((a, b) => b.stars - a.stars || b.starsToday - a.starsToday)
       .slice(0, MIN_EVERGREEN_POOL - monthlyEvergreen.length)
     : [];
+  const historyFallback = {
+    fresh: normalized.filter(repo => shortlists.freshNames.has(repo.fullName) && freshBlocked.has(repo.fullName)),
+    evergreen: normalized.filter(repo => evergreenShortlistNames.has(repo.fullName) && evergreenBlocked.has(repo.fullName))
+  };
   return {
     fresh,
     evergreen: [...monthlyEvergreen, ...weeklyFallback],
+    historyFallback,
     monthlyEvergreenCount: monthlyEvergreen.length,
     weeklyFallbackCount: weeklyFallback.length,
     freshBlocked: freshBlocked.size,
@@ -311,6 +320,7 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   let effectivePolicy = policy;
   let ownerFallback = false;
   let quantityFallback = false;
+  let historyFallback = false;
 
   // Pass 1: strict owner cooldown (avoid recent owners)
   let fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, false);
@@ -350,6 +360,35 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     console.error(`[github-digest] Quantity fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${finalCount} projects, ${distinctTopics} topics; relaxed AI/topic caps, kept one project per owner`);
   }
 
+  // If cooldowns leave fewer than the minimum, use blocked projects only as
+  // the final delivery safeguard. Unblocked projects are always selected first.
+  if (finalCount < MIN_TOTAL_RECOMMENDATIONS) {
+    const beforeCount = finalCount;
+    const beforeTopics = distinctTopics;
+    const fallbackFresh = pickDiverseCandidates(
+      pools.historyFallback?.fresh || [],
+      Math.max(0, FRESH_SELECTION_LIMIT - fresh.length),
+      effectivePolicy,
+      semanticState,
+      selected,
+      true
+    );
+    const fallbackEvergreen = pickDiverseCandidates(
+      pools.historyFallback?.evergreen || [],
+      Math.max(0, EVERGREEN_SELECTION_LIMIT - evergreen.length),
+      effectivePolicy,
+      semanticState,
+      selected,
+      true
+    );
+    fresh.push(...fallbackFresh);
+    evergreen.push(...fallbackEvergreen);
+    distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
+    finalCount = fresh.length + evergreen.length;
+    historyFallback = fallbackFresh.length + fallbackEvergreen.length > 0;
+    console.error(`[github-digest] History fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${finalCount} projects, ${distinctTopics} topics; reused blocked projects only to protect delivery`);
+  }
+
   if (finalCount < MIN_TOTAL_RECOMMENDATIONS || distinctTopics < policy.minDistinctTopics) {
     const message = `Diversity gate failed: selected=${finalCount}, topics=${distinctTopics}/${policy.minDistinctTopics}`;
     if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
@@ -364,7 +403,8 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     policy: effectivePolicy,
     semanticState,
     ownerFallback,
-    quantityFallback
+    quantityFallback,
+    historyFallback
   };
 }
 
@@ -562,7 +602,8 @@ async function main() {
       evergreen: selection.evergreen,
       policy: selection.policy,
       ownerFallback: selection.ownerFallback,
-      quantityFallback: selection.quantityFallback
+      quantityFallback: selection.quantityFallback,
+      historyFallback: selection.historyFallback
     }, null, 2));
     return;
   }

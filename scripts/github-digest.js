@@ -469,7 +469,8 @@ async function callLLM(systemPrompt) {
   });
   if (!response.ok) throw new Error(`API error (${response.status}): ${await response.text()}`);
   const result = await response.json();
-  return result.choices?.[0]?.message?.content?.trim() || '';
+ const message = result.choices?.[0]?.message || {};
+return (message.content || message.reasoning_content || '').trim();
 }
 
 function extractProjectNames(text) {

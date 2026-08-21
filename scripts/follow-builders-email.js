@@ -289,7 +289,8 @@ async function generateDigest(data, prompts) {
   }
 
   const payload = JSON.parse(text);
-  const digest = payload.choices?.[0]?.message?.content?.trim();
+  const message = payload.choices?.[0]?.message || {};
+const digest = (message.content || message.reasoning_content || "").trim();
   if (!digest) {
     throw new Error(`DeepSeek returned no digest: ${truncate(text, 1000)}`);
   }

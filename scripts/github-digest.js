@@ -461,7 +461,11 @@ async function callLLM(systemPrompt) {
       { role: 'user', content: '请生成符合全部格式要求的项目内容。' }
     ]
   };
-  if (/aliyuncs\.com|dashscope/.test(baseUrl)) requestBody.enable_thinking = true;
+  if (/aliyuncs\.com|dashscope/.test(baseUrl)) {
+    requestBody.enable_thinking = true;
+  } else if (/^deepseek-v4(?:-|$)/i.test(model)) {
+    requestBody.thinking = { type: 'disabled' };
+  }
   const response = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -469,8 +473,17 @@ async function callLLM(systemPrompt) {
   });
   if (!response.ok) throw new Error(`API error (${response.status}): ${await response.text()}`);
   const result = await response.json();
- const message = result.choices?.[0]?.message || {};
-return (message.content || message.reasoning_content || '').trim();
+  const choice = result.choices?.[0] || {};
+  const message = choice.message || {};
+  const content = typeof message.content === 'string' ? message.content.trim() : '';
+  if (!content) {
+    const hasReasoning = typeof message.reasoning_content === 'string' && message.reasoning_content.trim().length > 0;
+    throw new Error(`API returned no final content (finish_reason=${choice.finish_reason || 'unknown'}, has_reasoning_content=${hasReasoning})`);
+  }
+  if (/好的，用户给了|先大致浏览|标题选择：|开始写作|关于人物介绍：|Builder 动向选：|好，分配：/.test(content)) {
+    throw new Error('API returned planning/draft text instead of final project digest');
+  }
+  return content;
 }
 
 function extractProjectNames(text) {

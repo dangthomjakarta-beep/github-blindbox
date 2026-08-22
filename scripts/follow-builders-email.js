@@ -180,6 +180,7 @@ function buildPrompt(data, prompts) {
         "你的任务不是翻译信息流，而是按官方 prompt 的精神，筛选真正有原创观点、产品变化、研究进展或实操价值的内容。",
         "读者是中文 AI 工具使用者、产品/运营/业务负责人和想跟进 AI 产业变化的忙碌专业人士。",
         "你只可以使用用户提供的 JSON 内容写简报，不要访问网页，不要编造事实。",
+        "只输出最终简报正文，不要输出分析过程、筛选记录、标题候选、人物身份讨论、草稿或对 JSON 的复述。",
         "每个被写入简报的项目都必须带原始 URL；没有 URL 的内容不要写。",
         "输出简体中文。技术名词如 AI、LLM、API、agent、prompt、token、GPU、CPU、RAG 保持英文。",
         "语气专业但口语化，像懂行的朋友在早会上转述重点。",
@@ -269,18 +270,23 @@ async function generateDigest(data, prompts) {
   const model = env("ANTHROPIC_MODEL", env("DEEPSEEK_MODEL", "deepseek-chat"));
   const url = `${baseUrl}/chat/completions`;
 
+  const requestBody = {
+    model,
+    temperature: 0.35,
+    max_tokens: Number(env("MAX_DIGEST_TOKENS", "6000")),
+    messages: buildPrompt(data, prompts),
+  };
+  if (/^deepseek-v4(?:-|$)/i.test(model)) {
+    requestBody.thinking = { type: "disabled" };
+  }
+
   const res = await fetch(url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model,
-      temperature: 0.35,
-      max_tokens: Number(env("MAX_DIGEST_TOKENS", "6000")),
-      messages: buildPrompt(data, prompts),
-    }),
+    body: JSON.stringify(requestBody),
   });
 
   const text = await res.text();
@@ -289,10 +295,15 @@ async function generateDigest(data, prompts) {
   }
 
   const payload = JSON.parse(text);
-  const message = payload.choices?.[0]?.message || {};
-const digest = (message.content || message.reasoning_content || "").trim();
+  const choice = payload.choices?.[0] || {};
+  const message = choice.message || {};
+  const digest = typeof message.content === "string" ? message.content.trim() : "";
   if (!digest) {
-    throw new Error(`DeepSeek returned no digest: ${truncate(text, 1000)}`);
+    const hasReasoning = typeof message.reasoning_content === "string" && message.reasoning_content.trim().length > 0;
+    throw new Error(`DeepSeek returned no final digest content (finish_reason=${choice.finish_reason || "unknown"}, has_reasoning_content=${hasReasoning})`);
+  }
+  if (!/^#?\s*AI Builders Digest\b/i.test(digest) || /好的，用户给了|先大致浏览|标题选择：|开始写作|关于人物介绍：|Builder 动向选：|好，分配：/.test(digest)) {
+    throw new Error("DeepSeek returned planning/draft text instead of a final digest");
   }
   return digest;
 }

@@ -1,8 +1,8 @@
-name: GitHub 每日盲盒
+name: GitHub 每周盲盒
 
 on:
   schedule:
-    - cron: '0 10 * * *'   # 每天 18:00 北京时间（错开数据抓取时间，确保拿到最新数据）
+    - cron: '7 10 * * 0'   # 每周日 18:07 北京时间（错开整点拥堵并避开数据抓取时间）
   workflow_dispatch:       # 支持手动触发
 
 concurrency:
@@ -21,7 +21,7 @@ jobs:
       - name: 安装依赖
         run: npm install
 
-      - name: 自主抓取最新 Trending 数据
+      - name: 自主抓取最新周榜与月榜 Trending 数据
         run: node scripts/github-trending.js > trending-feed.json
 
       - name: 恢复历史去重与选题状态
@@ -60,7 +60,11 @@ jobs:
           DIGEST_ARGS=(--history-state-file .trending-history-state.json)
           if [ -s .trending-history.json ]; then
             DIGEST_ARGS+=(--exclude-file .trending-history.json)
-            echo "历史去重文件存在，将继续排除已推送项目"
+          fi
+          if [ -s .trending-history-state.json ]; then
+            echo "时间戳选题状态存在，按冷却窗口去重；不把 legacy excludeList 作为永久封禁"
+          elif [ -s .trending-history.json ]; then
+            echo "时间戳选题状态缺失，使用 legacy 历史名单完成迁移兼容"
           fi
           DATA_AGE_HOURS="$(node -e '
             const fs = require("fs");
@@ -86,7 +90,7 @@ jobs:
         run: |
           cat /tmp/digest.txt | node scripts/send-email.js \
             --to "$QQ_EMAIL" \
-            --subject "GitHub 每日盲盒 — $(date '+%Y-%m-%d')"
+            --subject "GitHub 每周盲盒 — $(TZ=Asia/Shanghai date '+%Y-%m-%d')"
 
       - name: 更新历史去重与选题状态
         if: steps.send-email.outcome == 'success'

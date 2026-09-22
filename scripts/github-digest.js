@@ -8,24 +8,28 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = join(__dirname, '..');
 const ENV_PATH = join(PROJECT_ROOT, '.env');
-const FRESH_COOLDOWN_DAYS = 7;
-const EVERGREEN_COOLDOWN_DAYS = 14;
+const FRESH_COOLDOWN_DAYS = 56;
+const EVERGREEN_COOLDOWN_DAYS = 120;
 const MAX_POOL_GENERATION_ATTEMPTS = 3;
 const MAX_LENGTH_REWRITE_ATTEMPTS = 2;
 const MIN_DIGEST_BYTES = 3600
-const FRESH_SELECTION_LIMIT = 7;
+const FRESH_SELECTION_LIMIT = 9;
 const EVERGREEN_SELECTION_LIMIT = 3;
-const MIN_TOTAL_RECOMMENDATIONS = 5;
-const MAX_TOTAL_RECOMMENDATIONS = 10;
+const FRESH_FALLBACK_LIMIT = 10;
+const EVERGREEN_FALLBACK_LIMIT = 6;
+const MIN_TOTAL_RECOMMENDATIONS = 9;
+const MAX_TOTAL_RECOMMENDATIONS = 12;
+const MAX_AI_FALLBACK = 9;
+const MIN_FRESH_POOL = 24;
 const MIN_EVERGREEN_POOL = 12;
-const FRESH_SHORTLIST_LIMIT = 60;
-const EVERGREEN_SHORTLIST_LIMIT = 30;
+const FRESH_SHORTLIST_LIMIT = 120;
+const EVERGREEN_SHORTLIST_LIMIT = 80;
 const DEFAULT_DIVERSITY_POLICY = {
-  maxAiProjects: 2,
-  maxPerTopic: 1,
-  minDistinctTopics: 4,
-  ownerCooldownDays: 7,
-  semanticCooldownDays: 7,
+  maxAiProjects: 6,
+  maxPerTopic: 2,
+  minDistinctTopics: 6,
+  ownerCooldownDays: 28,
+  semanticCooldownDays: 21,
   allowReducedDigest: true
 };
 
@@ -114,24 +118,27 @@ function namesInCooldown(entries, days, now) {
 }
 
 function normalizePeriods(repo) {
-  if (Array.isArray(repo.periods) && repo.periods.length > 0) return repo.periods;
+  const supported = ['weekly', 'monthly', 'daily'];
+  if (Array.isArray(repo.periods) && repo.periods.length > 0) {
+    const periods = [...new Set(repo.periods.filter(period => supported.includes(period)))];
+    if (periods.length > 0) return periods;
+  }
   const source = String(repo.source || '');
-  const periods = ['daily', 'weekly', 'monthly'].filter(period => source.includes(period));
-  return periods.length > 0 ? periods : ['weekly'];
+  const periods = ['weekly', 'monthly', 'daily'].filter(period => source.includes(period));
+  // A feed generated before period metadata was added was a daily feed. Keep
+  // that input usable for migration/dry-run diagnostics, but never infer
+  // weekly from an unlabelled source.
+  return periods.length > 0 ? periods : ['daily'];
 }
 
 // 热度单位映射：starsToday 的增量周期跟 primaryPeriod 对齐
 const GROWTH_UNIT = { daily: '星/日', weekly: '星/周', monthly: '星/月' };
 
 function resolvePrimaryPeriod(repo) {
-  if (repo.primaryPeriod) return repo.primaryPeriod;
-  // 旧数据兜底：从 periods 取最短周期
-  if (Array.isArray(repo.periods)) {
-    if (repo.periods.includes('daily')) return 'daily';
-    if (repo.periods.includes('weekly')) return 'weekly';
-    if (repo.periods.includes('monthly')) return 'monthly';
-  }
-  return 'weekly';
+  const periods = normalizePeriods(repo);
+  if (periods.includes('weekly')) return 'weekly';
+  if (periods.includes('monthly')) return 'monthly';
+  return 'daily';
 }
 
 function normalizeDiversityPolicy(preferences) {
@@ -221,9 +228,16 @@ function takeFreshDiverse(repos, limit) {
 
 function buildShortlists(repos) {
   const normalized = repos.map(repo => classifyRepo({ ...repo, periods: normalizePeriods(repo) }));
-  const freshCandidates = normalized.filter(repo => repo.periods.some(period => period === 'daily' || period === 'weekly'));
+  const hasPeriodMetadata = repos.some(repo =>
+    (Array.isArray(repo.periods) && repo.periods.some(period => ['weekly', 'monthly'].includes(period)))
+    || /weekly|monthly/.test(String(repo.source || ''))
+  );
+  const legacyDailyCompatibility = !hasPeriodMetadata;
+  const weeklyCandidates = normalized.filter(repo =>
+    repo.periods.includes('weekly') || (legacyDailyCompatibility && repo.periods.includes('daily'))
+  );
+  const freshCandidates = weeklyCandidates;
   const monthlyCandidates = normalized.filter(repo => repo.periods.includes('monthly'));
-  const weeklyCandidates = normalized.filter(repo => repo.periods.includes('weekly'));
   const fresh = takeFreshDiverse(freshCandidates, FRESH_SHORTLIST_LIMIT);
   const monthly = [...monthlyCandidates]
     .sort((a, b) => b.stars - a.stars || b.starsToday - a.starsToday)
@@ -235,6 +249,7 @@ function buildShortlists(repos) {
     freshNames: new Set(fresh.map(repo => repo.fullName)),
     monthlyNames: new Set(monthly.map(repo => repo.fullName)),
     weeklyFallbackNames: new Set(weeklyFallback.map(repo => repo.fullName)),
+    legacyDailyCompatibility,
     counts: { fresh: fresh.length, monthly: monthly.length, weeklyFallback: weeklyFallback.length }
   };
 }
@@ -243,14 +258,17 @@ function buildPools(repos, excludeList, historyState, now, shortlists) {
   const entries = historyState?.entries || [];
   const freshBlocked = namesInCooldown(entries, FRESH_COOLDOWN_DAYS, now);
   const evergreenBlocked = namesInCooldown(entries, EVERGREEN_COOLDOWN_DAYS, now);
-  // Keep the existing name cache as the authoritative legacy dedup layer.
-  // The timestamped state adds semantic cooldowns; it must not reopen old names.
-  for (const name of excludeList) {
-    freshBlocked.add(name);
-    evergreenBlocked.add(name);
-  }
   if (!historyState) {
+    // The legacy name cache is only a migration fallback. Once timestamped
+    // state exists, its dated cooldowns are authoritative rather than a
+    // permanent ban from every future digest.
+    for (const name of excludeList) {
+      freshBlocked.add(name);
+      evergreenBlocked.add(name);
+    }
     console.error('[github-digest] History state missing: using legacy name cache until the first successful migration');
+  } else if (excludeList.length > 0) {
+    console.error('[github-digest] Timestamped history state exists: ignoring legacy exclude list outside its migration role');
   }
   const normalized = repos
     .filter(repo => repo.owner !== 'sponsors' && repo.fullName)
@@ -275,6 +293,8 @@ function buildPools(repos, excludeList, historyState, now, shortlists) {
   return {
     fresh,
     evergreen: [...monthlyEvergreen, ...weeklyFallback],
+    // Kept in diagnostics for migration visibility; selection never consumes
+    // this blocked pool because a reduced digest is safer than repetition.
     historyFallback,
     monthlyEvergreenCount: monthlyEvergreen.length,
     weeklyFallbackCount: weeklyFallback.length,
@@ -294,21 +314,50 @@ function compareCandidatePriority(a, b, semanticState) {
 
 function pickDiverseCandidates(candidates, limit, policy, semanticState, selected, allowRecentOwners = false) {
   const picked = [];
-  const selectedTopics = new Map(selected.map(repo => [repo.topic, 1]));
+  const selectedTopics = new Map();
+  const selectedNames = new Set();
+  const selectedOwners = new Set();
+  for (const repo of selected) {
+    selectedTopics.set(repo.topic, (selectedTopics.get(repo.topic) || 0) + 1);
+    selectedNames.add(repo.fullName);
+    selectedOwners.add(repo.owner);
+  }
   let aiCount = selected.filter(repo => repo.isAi).length;
-  const available = (allowRecentOwners ? candidates : candidates.filter(repo => !semanticState.recentOwners.has(repo.owner)))
+  const available = candidates
+    .filter(repo => allowRecentOwners || !semanticState.recentOwners.has(repo.owner))
     .sort((a, b) => compareCandidatePriority(a, b, semanticState));
 
-  for (const repo of available) {
-    if (picked.length >= limit) break;
-    if (selected.some(item => item.fullName === repo.fullName)) continue;
-    if (selected.some(item => item.owner === repo.owner)) continue;
-    if ((selectedTopics.get(repo.topic) || 0) >= policy.maxPerTopic) continue;
-    if (repo.isAi && aiCount >= policy.maxAiProjects) continue;
+  const canPick = repo => {
+    if (selectedNames.has(repo.fullName) || selectedOwners.has(repo.owner)) return false;
+    if ((selectedTopics.get(repo.topic) || 0) >= policy.maxPerTopic) return false;
+    if (repo.isAi && aiCount >= policy.maxAiProjects) return false;
+    return true;
+  };
+  const add = repo => {
     picked.push(repo);
     selected.push(repo);
+    selectedNames.add(repo.fullName);
+    selectedOwners.add(repo.owner);
     selectedTopics.set(repo.topic, (selectedTopics.get(repo.topic) || 0) + 1);
     if (repo.isAi) aiCount++;
+  };
+
+  // First add at most one candidate from each unseen topic until the global
+  // diversity floor is met. Then fill by priority without exceeding any hard
+  // cap. This avoids both topic clumping and unnecessary over-diversification.
+  const bestPerUnseenTopic = new Map();
+  for (const repo of available) {
+    if (!selectedTopics.has(repo.topic) && !bestPerUnseenTopic.has(repo.topic) && canPick(repo)) {
+      bestPerUnseenTopic.set(repo.topic, repo);
+    }
+  }
+  for (const repo of bestPerUnseenTopic.values()) {
+    if (picked.length >= limit || selectedTopics.size >= policy.minDistinctTopics) break;
+    if (canPick(repo)) add(repo);
+  }
+  for (const repo of available) {
+    if (picked.length >= limit) break;
+    if (canPick(repo)) add(repo);
   }
   return picked;
 }
@@ -316,82 +365,83 @@ function pickDiverseCandidates(candidates, limit, policy, semanticState, selecte
 function selectDiverseDigest(pools, preferences, historyState, now) {
   const policy = normalizeDiversityPolicy(preferences);
   const semanticState = recentSemanticState(historyState?.entries || [], policy, now);
-  const selected = [];
-  let effectivePolicy = policy;
-  let ownerFallback = false;
-  let quantityFallback = false;
-  let historyFallback = false;
-
-  // Pass 1: strict owner cooldown (avoid recent owners)
-  let fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, false);
-  let evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, policy, semanticState, selected, false);
-  let distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
-
-  // Pass 2: if topic diversity insufficient, relax owner cooldown to fill missing topics
-  if (fresh.length + evergreen.length < MIN_TOTAL_RECOMMENDATIONS || distinctTopics < policy.minDistinctTopics) {
-    const beforeCount = fresh.length + evergreen.length;
-    const beforeTopics = distinctTopics;
-    selected.length = 0;
-    fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, policy, semanticState, selected, true);
-    evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, policy, semanticState, selected, true);
-    distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
-    ownerFallback = true;
-    console.error(`[github-digest] Owner cooldown fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${fresh.length + evergreen.length} projects, ${distinctTopics} topics`);
-  }
-
-  let finalCount = fresh.length + evergreen.length;
-
-  // Last resort: keep one project per owner, but relax AI and topic caps so a
-  // sparse history window does not suppress the entire day's email.
-  if (finalCount < MIN_TOTAL_RECOMMENDATIONS) {
-    const beforeCount = finalCount;
-    const beforeTopics = distinctTopics;
-    effectivePolicy = {
-      ...policy,
-      maxAiProjects: Math.max(policy.maxAiProjects, MAX_TOTAL_RECOMMENDATIONS),
-      maxPerTopic: Math.max(policy.maxPerTopic, MAX_TOTAL_RECOMMENDATIONS)
+  const runSelection = (currentPolicy, allowRecentOwners = false) => {
+    const selected = [];
+    const fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, currentPolicy, semanticState, selected, allowRecentOwners);
+    const evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, currentPolicy, semanticState, selected, allowRecentOwners);
+    let mixFallback = false;
+    if (selected.length < MAX_TOTAL_RECOMMENDATIONS && evergreen.length < EVERGREEN_FALLBACK_LIMIT) {
+      const extraEvergreen = pickDiverseCandidates(
+        pools.evergreen,
+        Math.min(EVERGREEN_FALLBACK_LIMIT - evergreen.length, MAX_TOTAL_RECOMMENDATIONS - selected.length),
+        currentPolicy,
+        semanticState,
+        selected,
+        allowRecentOwners
+      );
+      if (extraEvergreen.length > 0) {
+        evergreen.push(...extraEvergreen);
+        mixFallback = true;
+      }
+    }
+    if (selected.length < MAX_TOTAL_RECOMMENDATIONS && fresh.length < FRESH_FALLBACK_LIMIT) {
+      const extraFresh = pickDiverseCandidates(
+        pools.fresh,
+        Math.min(FRESH_FALLBACK_LIMIT - fresh.length, MAX_TOTAL_RECOMMENDATIONS - selected.length),
+        currentPolicy,
+        semanticState,
+        selected,
+        allowRecentOwners
+      );
+      if (extraFresh.length > 0) {
+        fresh.push(...extraFresh);
+        mixFallback = true;
+      }
+    }
+    return {
+      selected,
+      fresh,
+      evergreen,
+      policy: currentPolicy,
+      mixFallback,
+      distinctTopics: new Set(selected.map(repo => repo.topic)).size,
+      finalCount: selected.length,
+      aiCount: selected.filter(repo => repo.isAi).length
     };
-    selected.length = 0;
-    fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, effectivePolicy, semanticState, selected, true);
-    evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, effectivePolicy, semanticState, selected, true);
-    distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
-    finalCount = fresh.length + evergreen.length;
-    quantityFallback = true;
-    console.error(`[github-digest] Quantity fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${finalCount} projects, ${distinctTopics} topics; relaxed AI/topic caps, kept one project per owner`);
+  };
+
+  let result = runSelection(policy);
+  let aiCapFallback = false;
+  let ownerFallback = false;
+  if (result.finalCount < MIN_TOTAL_RECOMMENDATIONS || result.distinctTopics < policy.minDistinctTopics) {
+    const fallbackPolicy = { ...policy, maxAiProjects: Math.max(policy.maxAiProjects, MAX_AI_FALLBACK) };
+    const fallback = runSelection(fallbackPolicy);
+    if (fallback.finalCount > result.finalCount || fallback.distinctTopics > result.distinctTopics) {
+      console.error(`[github-digest] AI quota fallback: before=${result.finalCount} projects/${result.distinctTopics} topics; after=${fallback.finalCount} projects/${fallback.distinctTopics} topics; AI cap ${policy.maxAiProjects}→${fallbackPolicy.maxAiProjects}`);
+      result = fallback;
+      aiCapFallback = true;
+    }
+  }
+  if (result.finalCount < MIN_TOTAL_RECOMMENDATIONS || result.distinctTopics < policy.minDistinctTopics) {
+    const fallback = runSelection(result.policy, true);
+    if (fallback.finalCount > result.finalCount || fallback.distinctTopics > result.distinctTopics) {
+      console.error(`[github-digest] Owner cooldown fallback: before=${result.finalCount} projects/${result.distinctTopics} topics; after=${fallback.finalCount} projects/${fallback.distinctTopics} topics; project cooldown remains enforced`);
+      result = fallback;
+      ownerFallback = true;
+    }
   }
 
-  // If cooldowns leave fewer than the minimum, use blocked projects only as
-  // the final delivery safeguard. Unblocked projects are always selected first.
+  const { selected, fresh, evergreen, distinctTopics, finalCount, aiCount } = result;
+
+  if (distinctTopics < result.policy.minDistinctTopics) {
+    throw new Error(`Diversity gate failed: selected=${finalCount}, topics=${distinctTopics}/${result.policy.minDistinctTopics}, AI=${aiCount}/${result.policy.maxAiProjects}`);
+  }
   if (finalCount < MIN_TOTAL_RECOMMENDATIONS) {
-    const beforeCount = finalCount;
-    const beforeTopics = distinctTopics;
-    const fallbackFresh = pickDiverseCandidates(
-      pools.historyFallback?.fresh || [],
-      Math.max(0, FRESH_SELECTION_LIMIT - fresh.length),
-      effectivePolicy,
-      semanticState,
-      selected,
-      true
-    );
-    const fallbackEvergreen = pickDiverseCandidates(
-      pools.historyFallback?.evergreen || [],
-      Math.max(0, EVERGREEN_SELECTION_LIMIT - evergreen.length),
-      effectivePolicy,
-      semanticState,
-      selected,
-      true
-    );
-    fresh.push(...fallbackFresh);
-    evergreen.push(...fallbackEvergreen);
-    distinctTopics = new Set([...fresh, ...evergreen].map(repo => repo.topic)).size;
-    finalCount = fresh.length + evergreen.length;
-    historyFallback = fallbackFresh.length + fallbackEvergreen.length > 0;
-    console.error(`[github-digest] History fallback: before=${beforeCount} projects, ${beforeTopics} topics; after=${finalCount} projects, ${distinctTopics} topics; reused blocked projects only to protect delivery`);
+    throw new Error(`Quantity gate failed: selected=${finalCount}, minimum=${MIN_TOTAL_RECOMMENDATIONS}, topics=${distinctTopics}/${result.policy.minDistinctTopics}, AI=${aiCount}/${result.policy.maxAiProjects}`);
   }
-
-  if (finalCount < MIN_TOTAL_RECOMMENDATIONS || distinctTopics < policy.minDistinctTopics) {
-    const message = `Diversity gate failed: selected=${finalCount}, topics=${distinctTopics}/${policy.minDistinctTopics}`;
-    if (policy.allowReducedDigest && finalCount >= MIN_TOTAL_RECOMMENDATIONS) {
+  if (finalCount < MAX_TOTAL_RECOMMENDATIONS) {
+    const message = `Digest below target: selected=${finalCount}/${MAX_TOTAL_RECOMMENDATIONS}`;
+    if (result.policy.allowReducedDigest) {
       console.error(`[github-digest] ${message}; allowing reduced digest`);
     } else {
       throw new Error(message);
@@ -400,11 +450,13 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   return {
     fresh: fresh.map(repo => ({ ...repo, pool: 'fresh' })),
     evergreen: evergreen.map(repo => ({ ...repo, pool: 'evergreen' })),
-    policy: effectivePolicy,
+    policy: result.policy,
     semanticState,
+    aiCapFallback,
+    mixFallback: result.mixFallback,
     ownerFallback,
-    quantityFallback,
-    historyFallback
+    quantityFallback: false,
+    historyFallback: false
   };
 }
 
@@ -424,24 +476,25 @@ function formatCandidates(repos) {
 
 function buildEditorialPrompt(kind, repos, preferences) {
   const isFresh = kind === 'fresh';
-  const title = isFresh ? '今日新星' : '经典常青树';
+  const title = isFresh ? '本周新星' : '经典项目';
   const specialRule = isFresh
     ? '项目与主题已由程序完成质量筛选。不得改变、替换、增删或重新归类项目；只需把它们写成让企业 AI 项目负责人和运营人员愿意阅读的编辑内容。'
     : '项目与主题已由程序完成质量筛选。不得改变、替换、增删或重新归类项目；突出成熟项目仍可借鉴的产品思路。';
-  return `你是 GitHub 每日盲盒的编辑。下面是已经确定的「${title}」项目，必须逐个且仅对这些项目撰写内容。
+  return `你是 GitHub 每周盲盒的编辑。下面是已经确定的「${title}」项目，必须逐个且仅对这些项目撰写内容。
 
 阅读者画像：
 ${preferences.readerProfile}
 
 严格规则：
 1. 只能使用下方已确定的 fullName，不能编造、不能引用额外项目。
-2. 先输出一段开场文字（仅「今日新星」需要），然后严格按候选列表顺序输出每个项目块。不要输出其他标题、候选池说明、思考过程或道歉。
+2. 严格按候选列表顺序输出每个项目块。不要输出开场、其他标题、候选池说明、思考过程或道歉；开场由程序根据已选项目生成。
 3. 每个项目块以候选项目标注的主题作为三级标题，格式：### ⚡ 主题名。
 4. 每个项目块格式：
    **[owner/repo](https://github.com/owner/repo)** · ⭐ 总星数 · 📈 +数字 单位
-   然后用三个独立段落介绍，每段一句完整中文，约 70-100 个汉字，分别说明：它是什么、适合什么业务场景、如何迁移到团队或企业内部。每个项目末尾写「🔥 +数字 单位」热度标记，单位必须与候选池标注一致。
+   然后用三个独立段落介绍，每段一句完整中文，约 80-120 个汉字，分别说明：它是什么（只依据描述和候选事实）、对企业 AI／零售运营／知识库／自动化中相关方向的迁移价值、建议的最小试用动作（必须是可验证的试用建议，不要假设未给出的功能、集成或效果）。事实不足时明确写“当前描述未说明，需先验证”，不要补写。
 5. ${specialRule}
-6. 不得出现「没有好项目」「候选不足」「无法推荐」等拒绝语。
+6. 每个项目末尾写「🔥 +数字 单位」热度标记，单位必须与候选池标注一致；不要把月榜或其他口径改写成周榜。
+7. 不得出现「没有好项目」「候选不足」「无法推荐」等拒绝语，也不要改写成其他周期标题。
 
 已确定的${title}项目：
 ${formatCandidates(repos)}`;
@@ -519,8 +572,8 @@ async function writeSelection(kind, repos, preferences) {
 async function rewriteSelection(kind, selection, expectedCount) {
   if (expectedCount === 0) return selection;
   const allowedNames = new Set(selection.names);
-  const title = kind === 'fresh' ? '今日新星' : '经典常青树';
-  const prompt = `请扩写下面的「${title}」内容以提高邮件篇幅。严格保留原有 ${expectedCount} 个 Markdown 链接和品类分组标题（### ⚡ 品类名），不得新增、删除或替换项目链接，不得改变品类分组顺序。不要输出思考过程或候选池说明。每个项目仍用三个独立段落，每段为一句约 110-140 个汉字的完整中文，保留元信息行（⭐ 总星数 · 📈 +数字 单位）和末尾的🔥热度标记。\n\n原内容：\n${selection.text}`;
+  const title = kind === 'fresh' ? '本周新星' : '经典项目';
+  const prompt = `请扩写下面的「${title}」内容以提高邮件篇幅。严格保留原有 ${expectedCount} 个 Markdown 链接和品类分组标题（### ⚡ 品类名），不得新增、删除或替换项目链接，不得改变品类分组顺序。不要输出思考过程或候选池说明。每个项目仍用三个独立段落，每段为一句约 110-140 个汉字的完整中文，依次保留“它是什么、迁移价值、最小试用动作”三层信息，只使用原内容和候选事实，不补写未给出的功能或效果；保留元信息行（⭐ 总星数 · 📈 +数字 单位）和末尾的🔥热度标记。\n\n原内容：\n${selection.text}`;
   for (let attempt = 1; attempt <= MAX_LENGTH_REWRITE_ATTEMPTS; attempt++) {
     const text = await callLLM(prompt);
     const validation = validateSelection(text, allowedNames, expectedCount);
@@ -530,14 +583,26 @@ async function rewriteSelection(kind, selection, expectedCount) {
   return selection;
 }
 
-function composeDigest(today, fresh, evergreen, freshTarget, dataAgeHours) {
-  const fallbackHeading = freshTarget < 4 ? '🏆 经典常青树补充' : '🏆 经典常青树';
-  const freshSection = freshTarget > 0
-    ? `## 🔥 今日新星\n\n${fresh.text}\n`
-    : '## 📦 本期说明\n\n今日新星候选在 hardFilter 与 7 天冷却后不足，本期仅由经典项目补充推荐。\n';
-  const evergreenSection = evergreen.text ? `\n## ${fallbackHeading}\n\n${evergreen.text}\n` : '';
-  const ageNotice = dataAgeHours !== null && dataAgeHours >= 24 ? `⚠️ 数据非当日，源自 ${dataAgeHours} 小时前。\n\n` : '';
-  return `# GitHub 每日盲盒 — ${today}\n\n${ageNotice}${freshSection}${evergreenSection}\n以上由 AI 从 GitHub Trending 自动筛选生成\n`;
+function buildWeeklyObservation(selected) {
+  const topics = [...new Set(selected.map(repo => repo.topicLabel).filter(Boolean))];
+  const weeklyCount = selected.filter(repo => resolvePrimaryPeriod(repo) === 'weekly').length;
+  const monthlyCount = selected.filter(repo => resolvePrimaryPeriod(repo) === 'monthly').length;
+  const legacyCount = selected.length - weeklyCount - monthlyCount;
+  const periodParts = [];
+  if (weeklyCount > 0) periodParts.push(`${weeklyCount} 个使用周榜热度`);
+  if (monthlyCount > 0) periodParts.push(`${monthlyCount} 个仅有月榜热度`);
+  if (legacyCount > 0) periodParts.push(`${legacyCount} 个只有旧数据口径，需重新抓取周榜或月榜`);
+  const periodNote = periodParts.join('，') || '热度口径待补';
+  return `本期已选 ${selected.length} 个项目，覆盖 ${topics.length} 个主题：${topics.join('、')}；${periodNote}。下面只展开本期清单中的项目，并为每个项目给出企业 AI、零售运营、知识库或自动化方向的迁移判断与最小试用动作。`;
+}
+
+function composeDigest(today, selected, fresh, evergreen, dataAgeHours) {
+  const freshSection = fresh.text
+    ? `## 🔥 本周新星\n\n${fresh.text}\n`
+    : '## 📦 本期说明\n\n本周新星候选在 hardFilter 与冷却规则后不足，本期仅展示可用的经典项目。\n';
+  const evergreenSection = evergreen.text ? `\n## 🏆 经典项目\n\n${evergreen.text}\n` : '';
+  const ageNotice = dataAgeHours !== null && dataAgeHours >= 24 ? `⚠️ 数据源距本次运行已 ${dataAgeHours} 小时。\n\n` : '';
+  return `# GitHub 每周盲盒 — ${today}\n\n${ageNotice}## 🧭 本周观察\n\n${buildWeeklyObservation(selected)}\n\n${freshSection}${evergreenSection}\n以上由 AI 从 GitHub Trending 自动筛选生成\n`;
 }
 
 function writeHistoryOutputs(args, selected) {
@@ -579,7 +644,9 @@ function writeHistoryOutputs(args, selected) {
         isAi: item.isAi,
         stars: item.stars,
         starsToday: item.starsToday,
-        primaryPeriod: resolvePrimaryPeriod(item)
+        primaryPeriod: resolvePrimaryPeriod(item),
+        periods: item.periods,
+        source: item.source
       }))
     });
     console.error(`[github-digest] Selection manifest saved: ${selected.length} projects`);
@@ -600,21 +667,30 @@ async function main() {
   console.error(`[github-digest] Input ${data.repos.length} repos → hard filter kept ${kept.length}, removed ${dropped.length}`);
   for (const item of dropped) console.error(`  ✗ ${item.repo.fullName} — ${item.reason}`);
   const shortlists = buildShortlists(kept);
-  console.error(`[github-digest] Shortlists: fresh=${shortlists.counts.fresh}/${FRESH_SHORTLIST_LIMIT}, evergreen monthly=${shortlists.counts.monthly}/${EVERGREEN_SHORTLIST_LIMIT}, weekly fallback=${shortlists.counts.weeklyFallback}/${EVERGREEN_SHORTLIST_LIMIT}`);
+  console.error(`[github-digest] Shortlists: fresh=${shortlists.counts.fresh}/${FRESH_SHORTLIST_LIMIT}, evergreen monthly=${shortlists.counts.monthly}/${EVERGREEN_SHORTLIST_LIMIT}, weekly fallback=${shortlists.counts.weeklyFallback}/${EVERGREEN_SHORTLIST_LIMIT}, legacyDaily=${shortlists.legacyDailyCompatibility}`);
   const historyState = loadHistoryState(args.historyStateFile);
   const pools = buildPools(kept, args.excludeList, historyState, Date.now(), shortlists);
-  console.error(`[github-digest] Pools: fresh=${pools.fresh.length} (blocked=${pools.freshBlocked}, target ≥20); evergreen=${pools.evergreen.length} (monthly=${pools.monthlyEvergreenCount}, weekly fallback=${pools.weeklyFallbackCount}, blocked=${pools.evergreenBlocked})`);
-  if (pools.fresh.length < 20) console.error(`[github-digest] Warning: fresh pool below acceptance target (${pools.fresh.length}/20)`);
+  console.error(`[github-digest] Pools: fresh=${pools.fresh.length} (blocked=${pools.freshBlocked}, target ≥${MIN_FRESH_POOL}); evergreen=${pools.evergreen.length} (monthly=${pools.monthlyEvergreenCount}, weekly fallback=${pools.weeklyFallbackCount}, blocked=${pools.evergreenBlocked})`);
+  if (pools.fresh.length < MIN_FRESH_POOL) console.error(`[github-digest] Warning: fresh pool below acceptance target (${pools.fresh.length}/${MIN_FRESH_POOL})`);
 
   const now = Date.now();
   const selection = selectDiverseDigest(pools, preferences, historyState, now);
-  console.error(`[github-digest] Diversity selection: fresh=${selection.fresh.length}, evergreen=${selection.evergreen.length}, topics=${new Set([...selection.fresh, ...selection.evergreen].map(repo => repo.topic)).size}/${selection.policy.minDistinctTopics}, AI=${[...selection.fresh, ...selection.evergreen].filter(repo => repo.isAi).length}/${selection.policy.maxAiProjects}, ownerFallback=${selection.ownerFallback}`);
+  const selected = [...selection.fresh, ...selection.evergreen];
+  const selectedTopics = new Set(selected.map(repo => repo.topic));
+  const selectedAi = selected.filter(repo => repo.isAi).length;
+  console.error(`[github-digest] Diversity selection: fresh=${selection.fresh.length}, evergreen=${selection.evergreen.length}, total=${selected.length}, topics=${selectedTopics.size}/${selection.policy.minDistinctTopics}, AI=${selectedAi}/${selection.policy.maxAiProjects}, fullNameCooldown=${FRESH_COOLDOWN_DAYS}/${EVERGREEN_COOLDOWN_DAYS}d, ownerCooldown=${selection.policy.ownerCooldownDays}d`);
 
   if (args.dryRun) {
     console.log(JSON.stringify({
       fresh: selection.fresh,
       evergreen: selection.evergreen,
+      selectedCount: selected.length,
+      topicCount: selectedTopics.size,
+      aiCount: selectedAi,
+      legacyDailyCompatibility: shortlists.legacyDailyCompatibility,
       policy: selection.policy,
+      aiCapFallback: selection.aiCapFallback,
+      mixFallback: selection.mixFallback,
       ownerFallback: selection.ownerFallback,
       quantityFallback: selection.quantityFallback,
       historyFallback: selection.historyFallback
@@ -622,27 +698,32 @@ async function main() {
     return;
   }
 
-  const today = new Date().toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
+  const today = new Date().toLocaleDateString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    weekday: 'long'
+  });
   let fresh = await writeSelection('fresh', selection.fresh, preferences);
   let evergreen = await writeSelection('evergreen', selection.evergreen, preferences);
-  let digest = composeDigest(today, fresh, evergreen, selection.fresh.length, args.dataAgeHours);
+  let digest = composeDigest(today, selected, fresh, evergreen, args.dataAgeHours);
   let bytes = Buffer.byteLength(digest, 'utf8');
   if (bytes < MIN_DIGEST_BYTES) {
     // 先重写较短的池
     const rewriteFresh = selection.evergreen.length === 0 || Buffer.byteLength(fresh.text, 'utf8') <= Buffer.byteLength(evergreen.text, 'utf8');
     if (rewriteFresh) fresh = await rewriteSelection('fresh', fresh, selection.fresh.length);
     else evergreen = await rewriteSelection('evergreen', evergreen, selection.evergreen.length);
-    digest = composeDigest(today, fresh, evergreen, selection.fresh.length, args.dataAgeHours);
+    digest = composeDigest(today, selected, fresh, evergreen, args.dataAgeHours);
     bytes = Buffer.byteLength(digest, 'utf8');
     // 如果还不够，再重写另一个池
     if (bytes < MIN_DIGEST_BYTES) {
       if (rewriteFresh) evergreen = await rewriteSelection('evergreen', evergreen, selection.evergreen.length);
       else fresh = await rewriteSelection('fresh', fresh, selection.fresh.length);
-      digest = composeDigest(today, fresh, evergreen, selection.fresh.length, args.dataAgeHours);
+      digest = composeDigest(today, selected, fresh, evergreen, args.dataAgeHours);
       bytes = Buffer.byteLength(digest, 'utf8');
     }
   }
-  const selected = [...selection.fresh, ...selection.evergreen];
   if (selected.length < MIN_TOTAL_RECOMMENDATIONS || selected.length > MAX_TOTAL_RECOMMENDATIONS) {
     throw new Error(`Digest project count ${selected.length} is outside ${MIN_TOTAL_RECOMMENDATIONS}-${MAX_TOTAL_RECOMMENDATIONS}`);
   }

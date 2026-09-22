@@ -44,9 +44,9 @@
 
 ## 5. 手动触发收第一封邮件
 
-进你 Fork 的仓库 → **Actions** → 左边点 **GitHub 每日盲盒** → 右边点 **Run workflow** → 绿色按钮。
+进你 Fork 的仓库 → **Actions** → 左边点 **GitHub 每周盲盒** → 右边点 **Run workflow** → 绿色按钮。
 
-等 1-2 分钟，刷新页面看圆圈有没有变绿勾。变绿了就去 QQ 邮箱收件箱查收。**没有就去垃圾邮件里找找。**
+等 1—2 分钟，刷新页面看圆圈有没有变绿勾。变绿了就去 QQ 邮箱收件箱查收。**没有就去垃圾邮件里找找。**手动运行不会改变每周日的定时设置。
 
 ---
 
@@ -56,12 +56,12 @@
 
 **筛选方向**：打开 `config/preferences.json`，修改 `readerProfile`。你可以写入自己的业务场景，例如企业 AI 落地、零售运营、知识库、自动化、经营数据和培训内容。不要直接改 `scripts/github-digest.js` 里的程序逻辑。
 
-**选题多样性**：同一个文件里的 `diversityPolicy` 控制同一主题、同一组织和 AI 项目数量；`hardFilters` 控制明显无关项目。`.trending-history*.json` 和 `.trending-selection*.json` 是 Actions 自动缓存，不需要手工创建，也不要提交到仓库。
+**选题多样性**：同一个文件里的 `diversityPolicy` 控制同一主题、同一组织、语义冷却、AI 项目数量和最少主题数；当前默认同一主题最多 2 个、至少 6 个主题、通常 AI 项目最多 6 个。默认组合是 9 个本周新星＋3 个经典项目；新星不足时经典项目最多补到 6 个。若候选仍不足 9 个，程序先把 AI 配额放宽到 9 个，再允许同一组织换推另一个未冷却项目；一封邮件内同一组织仍只出现一次，项目冷却和主题限制始终不放宽。通常输出 10—12 个，极端候选不足时最低 9 个。`.trending-history*.json` 和 `.trending-selection*.json` 是 Actions 自动缓存，不需要手工创建，也不要提交到仓库。时间戳历史存在时按 56／120 天项目冷却；只有时间戳历史缺失时，旧的 `.trending-history.json` 才作为迁移兼容名单。
 
-**推送时间**：到 `.github/workflows/digest.yml` 里找到 cron 那行改掉。注意我每天 05:00 抓数据，GitHub Actions 有延迟，**推送必须设在 07:00 之后**。
+**推送时间**：默认是每周日北京时间 18:07，对应 UTC cron `7 10 * * 0`。GitHub Actions 的 schedule 可能延迟，18:07 是为了避开整点拥堵，不保证秒级准点；如要改时间，按“北京时间 - 8”换算 UTC，并保留 `workflow_dispatch` 方便手动验证。例如每周日 20:00 可用 `0 12 * * 0`。
 
-UTC 换算：`北京时间 - 8`。想 20:00 收到就填 `0 12 * * *`，想 22:00 收到就填 `0 14 * * *`。
+**数据口径**：每次运行对全语言、Python、JavaScript、TypeScript、Go 五个维度分别抓取 `weekly` 和 `monthly`。同一仓库合并时优先周榜，只有月榜数据时才使用月榜热度；来源会保留 period。
 
 改完直接 GitHub 网页上点 Commit 就行。
 
-这次升级只涉及 GitHub 每日盲盒工作流；`follow-builders-email.yml` 不需要同步或修改。不要点击“同步分支”或“丢弃提交”，只在你自己的 Fork 中提交上述文件的更新。
+这次升级只涉及 GitHub 每周盲盒工作流；`follow-builders-email.yml` 和 `follow-builders-email.js` 不需要同步或修改。不要点击“同步分支”或“丢弃提交”，只在你自己的 Fork 中提交上述文件的更新。

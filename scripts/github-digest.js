@@ -312,7 +312,8 @@ function compareCandidatePriority(a, b, semanticState) {
   return score(b) - score(a) || b.starsToday - a.starsToday || b.stars - a.stars;
 }
 
-function pickDiverseCandidates(candidates, limit, policy, semanticState, selected, allowRecentOwners = false) {
+function pickDiverseCandidates(candidates, limit, policy, semanticState, selected, options = {}) {
+  const { allowRecentOwners = false, allowRecentSemantics = false } = options;
   const picked = [];
   const selectedTopics = new Map();
   const selectedNames = new Set();
@@ -325,6 +326,8 @@ function pickDiverseCandidates(candidates, limit, policy, semanticState, selecte
   let aiCount = selected.filter(repo => repo.isAi).length;
   const available = candidates
     .filter(repo => allowRecentOwners || !semanticState.recentOwners.has(repo.owner))
+    .filter(repo => allowRecentSemantics
+      || (!semanticState.recentTopics.has(repo.topic) && !semanticState.recentEcosystems.has(repo.ecosystem)))
     .sort((a, b) => compareCandidatePriority(a, b, semanticState));
 
   const canPick = repo => {
@@ -365,10 +368,10 @@ function pickDiverseCandidates(candidates, limit, policy, semanticState, selecte
 function selectDiverseDigest(pools, preferences, historyState, now) {
   const policy = normalizeDiversityPolicy(preferences);
   const semanticState = recentSemanticState(historyState?.entries || [], policy, now);
-  const runSelection = (currentPolicy, allowRecentOwners = false) => {
+  const runSelection = (currentPolicy, options = {}) => {
     const selected = [];
-    const fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, currentPolicy, semanticState, selected, allowRecentOwners);
-    const evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, currentPolicy, semanticState, selected, allowRecentOwners);
+    const fresh = pickDiverseCandidates(pools.fresh, FRESH_SELECTION_LIMIT, currentPolicy, semanticState, selected, options);
+    const evergreen = pickDiverseCandidates(pools.evergreen, EVERGREEN_SELECTION_LIMIT, currentPolicy, semanticState, selected, options);
     let mixFallback = false;
     if (selected.length < MAX_TOTAL_RECOMMENDATIONS && evergreen.length < EVERGREEN_FALLBACK_LIMIT) {
       const extraEvergreen = pickDiverseCandidates(
@@ -377,7 +380,7 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
         currentPolicy,
         semanticState,
         selected,
-        allowRecentOwners
+        options
       );
       if (extraEvergreen.length > 0) {
         evergreen.push(...extraEvergreen);
@@ -391,7 +394,7 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
         currentPolicy,
         semanticState,
         selected,
-        allowRecentOwners
+        options
       );
       if (extraFresh.length > 0) {
         fresh.push(...extraFresh);
@@ -411,11 +414,18 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
   };
 
   let result = runSelection(policy);
+  let semanticFallback = false;
   let aiCapFallback = false;
   let ownerFallback = false;
   if (result.finalCount < MIN_TOTAL_RECOMMENDATIONS || result.distinctTopics < policy.minDistinctTopics) {
+    const before = result;
+    result = runSelection(policy, { allowRecentSemantics: true });
+    semanticFallback = true;
+    console.error(`[github-digest] Semantic cooldown fallback: before=${before.finalCount} projects/${before.distinctTopics} topics; after=${result.finalCount} projects/${result.distinctTopics} topics; recent topics may reappear, project cooldown remains enforced`);
+  }
+  if (result.finalCount < MIN_TOTAL_RECOMMENDATIONS || result.distinctTopics < policy.minDistinctTopics) {
     const fallbackPolicy = { ...policy, maxAiProjects: Math.max(policy.maxAiProjects, MAX_AI_FALLBACK) };
-    const fallback = runSelection(fallbackPolicy);
+    const fallback = runSelection(fallbackPolicy, { allowRecentSemantics: semanticFallback });
     if (fallback.finalCount > result.finalCount || fallback.distinctTopics > result.distinctTopics) {
       console.error(`[github-digest] AI quota fallback: before=${result.finalCount} projects/${result.distinctTopics} topics; after=${fallback.finalCount} projects/${fallback.distinctTopics} topics; AI cap ${policy.maxAiProjects}→${fallbackPolicy.maxAiProjects}`);
       result = fallback;
@@ -423,7 +433,10 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     }
   }
   if (result.finalCount < MIN_TOTAL_RECOMMENDATIONS || result.distinctTopics < policy.minDistinctTopics) {
-    const fallback = runSelection(result.policy, true);
+    const fallback = runSelection(result.policy, {
+      allowRecentSemantics: semanticFallback,
+      allowRecentOwners: true
+    });
     if (fallback.finalCount > result.finalCount || fallback.distinctTopics > result.distinctTopics) {
       console.error(`[github-digest] Owner cooldown fallback: before=${result.finalCount} projects/${result.distinctTopics} topics; after=${fallback.finalCount} projects/${fallback.distinctTopics} topics; project cooldown remains enforced`);
       result = fallback;
@@ -452,6 +465,7 @@ function selectDiverseDigest(pools, preferences, historyState, now) {
     evergreen: evergreen.map(repo => ({ ...repo, pool: 'evergreen' })),
     policy: result.policy,
     semanticState,
+    semanticFallback,
     aiCapFallback,
     mixFallback: result.mixFallback,
     ownerFallback,
@@ -689,6 +703,7 @@ async function main() {
       aiCount: selectedAi,
       legacyDailyCompatibility: shortlists.legacyDailyCompatibility,
       policy: selection.policy,
+      semanticFallback: selection.semanticFallback,
       aiCapFallback: selection.aiCapFallback,
       mixFallback: selection.mixFallback,
       ownerFallback: selection.ownerFallback,

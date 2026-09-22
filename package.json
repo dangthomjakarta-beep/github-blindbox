@@ -1,7 +1,7 @@
 {
   "name": "github-blindbox",
   "version": "1.0.0",
-  "description": "GitHub 每日盲盒 — AI 自动筛选 Trending 项目，推送到邮箱",
+  "description": "GitHub 每周盲盒 — AI 自动筛选 Trending 项目，推送到邮箱",
   "type": "module",
   "scripts": {
     "digest": "node scripts/github-digest.js",
